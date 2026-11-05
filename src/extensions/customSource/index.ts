@@ -2,6 +2,7 @@ import type { SongResult } from '../../types';
 import type { AudioQualityPreference, OnlineMusicProvider, ProviderAudioSource } from '../../types/onlineMusic';
 import { getOnlineMusicProvider, registerOnlineMusicProvider } from '../../services/onlineMusic/providerRegistry';
 import { getCustomSourceBridge } from './bridge';
+import { searchKugou, searchQq } from '../builtin/search';
 
 // src/extensions/customSource/index.ts
 //
@@ -78,6 +79,73 @@ const askCustomSource = async (
     };
 };
 
+/** LX 取址通道映射的反查：provider id → 脚本 source key。 */
+const LX_PROVIDER_BY_SOURCE: Record<string, string> = {
+    wy: 'netease',
+    kg: 'kugou',
+    tx: 'qq',
+};
+
+/** 当前有启用脚本认领的 source key；install 时刷新。 */
+const servedLxSources = new Set<string>();
+
+/**
+ * 跨平台兜底取址的短期记忆：一首歌刚在别的平台找到地址，重试/换音质时不再回查。
+ * 地址会过期，所以带 TTL，且只在取址成功时记。
+ */
+const FALLBACK_TTL_MS = 10 * 60 * 1000;
+const fallbackCache = new Map<string, { source: ProviderAudioSource; at: number }>();
+
+/**
+ * 跨平台兜底取址：本平台的脚本与内置音源都拿不到地址时，用「歌名 歌手」到酷狗 / QQ 回查，
+ * 拿到那边的 id 再让脚本取址。网易云的歌单（wy 的脚本取址基本不通）靠这条救回来；
+ * 不依赖登录，也不改队列里那首歌本身——只有声音换了来源。
+ *
+ * 平台先后与搜索聚合一致：先酷狗（公共接口、脚本成功率高），再 QQ。
+ */
+const crossPlatformSource = async (
+    song: SongResult,
+    quality: AudioQualityPreference,
+): Promise<ProviderAudioSource | null> => {
+    const cacheKey = `${song.id}:${quality}`;
+    const cached = fallbackCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < FALLBACK_TTL_MS) return cached.source;
+
+    const artist = (song.artists || []).map(a => a.name).filter(Boolean)[0] ?? '';
+    const query = [song.name, artist].filter(Boolean).join(' ');
+    if (!query) return null;
+
+    const candidates: Array<{ lxSource: string; run: () => Promise<SongResult[]> }> = [];
+    if (servedLxSources.has('kg')) candidates.push({ lxSource: 'kg', run: async () => (await searchKugou(query, 6, 0)).songs });
+    if (servedLxSources.has('tx')) candidates.push({ lxSource: 'tx', run: async () => (await searchQq(query, 6, 0)).songs });
+
+    for (const { lxSource, run } of candidates) {
+        let match: SongResult | null = null;
+        try {
+            const songs = await run();
+            const providerId = LX_PROVIDER_BY_SOURCE[lxSource];
+            match = songs.find(s => (providerId === 'kugou' ? s.kgHash : s.qqMid)) ?? null;
+        } catch (error) {
+            console.warn(`[CustomSource] 兜底搜索（${lxSource}）失败:`, error);
+        }
+        if (!match) continue;
+        const providerId = LX_PROVIDER_BY_SOURCE[lxSource];
+        const info = buildMusicInfo(match, providerId);
+        if (!info) continue;
+        try {
+            const resolved = await askCustomSource(lxSource, info, quality);
+            if (resolved) {
+                fallbackCache.set(cacheKey, { source: resolved, at: Date.now() });
+                console.info(`[CustomSource] 跨平台兜底取址成功（${lxSource}）: ${song.name}`);
+                return resolved;
+            }
+        } catch (error) {
+            console.warn(`[CustomSource] 兜底取址（${lxSource}）失败:`, error);
+        }
+    }
+    return null;
+};
+
 const withCustomSource = (provider: OnlineMusicProvider, lxSource: string): OnlineMusicProvider => {
     const playback = provider.playback;
     if (!playback) return provider;
@@ -98,7 +166,22 @@ const withCustomSource = (provider: OnlineMusicProvider, lxSource: string): Onli
                         console.warn('[CustomSource] 自定义源取址失败，回落到内置音源:', error);
                     }
                 }
-                return playback.getAudioSource(song, quality);
+
+                // 内置音源也拿不到地址（未登录、版权下架）时，跨平台兜底是最后一条路。
+                let builtinSource: ProviderAudioSource | null = null;
+                let builtinThrew: unknown;
+                try {
+                    builtinSource = await playback.getAudioSource(song, quality);
+                } catch (error) {
+                    builtinThrew = error;
+                }
+                if (builtinSource) return builtinSource;
+
+                const fallback = await crossPlatformSource(song, quality);
+                if (fallback) return fallback;
+
+                if (builtinThrew) throw builtinThrew;
+                return builtinSource;
             },
         },
     };
@@ -123,6 +206,11 @@ export const installCustomSourceExtension = async (): Promise<void> => {
         console.warn('[CustomSource] 读取自定义源失败:', error);
         served = new Set();
     }
+
+    // 跨平台兜底取址要知道哪些平台有脚本可用；换脚本后缓存作废。
+    servedLxSources.clear();
+    for (const key of served) servedLxSources.add(key);
+    fallbackCache.clear();
 
     for (const [providerId, lxSource] of Object.entries(LX_SOURCE_BY_PROVIDER)) {
         if (!originals.has(providerId)) {
