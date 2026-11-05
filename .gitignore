@@ -99,3 +99,6 @@ dist-runtime/
 
 # WorkBuddy 的 AI 工作日志/缓存：纯本地使用，不进公开仓库。
 .workbuddy/
+
+# 本地打包产物（CI 下载的安装包）
+.ci-out/
