@@ -97,7 +97,5 @@ __pycache__/
 # Built by build/buildPythonRuntime.mjs - binary artifacts that live on the mirrors, not in git.
 dist-runtime/
 
-# WorkBuddy 的项目记忆：两位开发者（两台机器）共用同一份，所以 memory/ 入库；这个目录下别的
-# 缓存、临时文件一概不进仓库。
-.workbuddy/*
-!.workbuddy/memory/
+# WorkBuddy 的 AI 工作日志/缓存：纯本地使用，不进公开仓库。
+.workbuddy/
