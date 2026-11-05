@@ -275,10 +275,17 @@ const createSandboxGlobal = (api: unknown, scopedConsole: Console): Record<strin
         const value = (globalThis as unknown as Record<string, unknown>)[key];
         if (typeof value === 'function') sandbox[key] = (value as (...args: unknown[]) => unknown).bind(globalThis);
     }
-    sandbox.globalThis = sandbox;
-    sandbox.window = sandbox;
-    sandbox.self = sandbox;
-    sandbox.global = sandbox;
+    // Identity properties must be defined directly on the sandbox: a plain assignment walks the
+    // prototype chain, and on a real `window` (the sandbox's prototype) `window`/`globalThis`/`self`
+    // are getter-only own accessors - strict-mode assignment then throws
+    // "Cannot set property window of #<Window> which has only a getter" (Android WebView).
+    const defineIdentity = (key: string, value: unknown) => {
+        Object.defineProperty(sandbox, key, { value, writable: true, enumerable: true, configurable: true });
+    };
+    defineIdentity('globalThis', sandbox);
+    defineIdentity('window', sandbox);
+    defineIdentity('self', sandbox);
+    defineIdentity('global', sandbox);
     return sandbox;
 };
 
