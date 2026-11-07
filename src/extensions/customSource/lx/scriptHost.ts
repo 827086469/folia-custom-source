@@ -58,6 +58,8 @@ const RESOLVE_TIMEOUT_MS = 12_000;
 const RESOLVE_BUDGET_MS = 25_000;
 /** How long a script may take to send `inited` - real ones ask a server for their source list first. */
 const INIT_TIMEOUT_MS = 8_000;
+/** How long an injected audio probe may take before the address is passed unverified. */
+const PROBE_TIMEOUT_MS = 10_000;
 
 export const LOG_PREFIX = '[CustomSource]';
 
@@ -92,6 +94,21 @@ export type LxRequestCallback = (error: unknown, response?: LxResponse, body?: u
 
 /** `lx.request` as a script sees it: returns a cancel function. */
 export type LxRequest = (url: string, options: LxRequestOptions, callback: LxRequestCallback) => () => void;
+
+/** The outcome of verifying a handed-out audio URL. `reason` is only set when `ok` is false. */
+export interface LxProbeResult {
+    ok: boolean;
+    reason?: string;
+    total?: number | null;
+}
+
+/**
+ * Verifies that a URL a script handed out really is the song, not a few seconds of spoken notice
+ * served as audio (the desktop host answers this from its main process, `custom-source/lxHost.cjs`;
+ * the mobile host answers it through the native stack, `./mobile/http.ts`). Both reject only what
+ * they can prove: a probe that cannot answer is never a reason to drop the address.
+ */
+export type LxAudioProbe = (url: string) => Promise<LxProbeResult>;
 
 export interface LxScriptStore {
     /** Where the scripts live, printed in the settings page. */
@@ -456,6 +473,11 @@ export interface LxHostOptions {
     request: LxRequest;
     /** Notified with each answering URL, for hosts that must allow the media host afterwards. */
     onAudioSource?: (url: string) => void;
+    /**
+     * Verifies each handed-out URL before it is answered (see `LxAudioProbe`). Optional so hosts
+     * without a native transport keep the trust-the-script behaviour of before.
+     */
+    probeAudioUrl?: LxAudioProbe;
     logger?: LxLogger;
 }
 
@@ -467,7 +489,7 @@ export interface LxResolveResult {
     error?: { code: string; message: string };
 }
 
-export const createLxHost = ({ store, request, onAudioSource = () => undefined, logger = console }: LxHostOptions) => {
+export const createLxHost = ({ store, request, onAudioSource = () => undefined, probeAudioUrl, logger = console }: LxHostOptions) => {
     const scripts: LxScriptRecord[] = [];
     let disabled: string[] = [];
     let loadedAt = 0;
@@ -612,6 +634,29 @@ export const createLxHost = ({ store, request, onAudioSource = () => undefined, 
                     continue;
                 }
                 const resolved = url.trim();
+                // The desktop host's rule, kept identical here: an address that answers with a few
+                // seconds of spoken notice instead of the song is not an address - the player would
+                // "play" the notice and no fallback would ever run. A probe that cannot answer
+                // (slow, HEAD-restricted, erroring) passes the address as-is; only what it can prove
+                // counts against it.
+                if (probeAudioUrl) {
+                    let probe: LxProbeResult = { ok: true, total: null };
+                    try {
+                        probe = await withTimeout(Promise.resolve(probeAudioUrl(resolved)), PROBE_TIMEOUT_MS, '验真超时');
+                    } catch {
+                        probe = { ok: true, total: null, reason: '未验真' };
+                    }
+                    if (!probe.ok) {
+                        failures.push(`${record.file}：地址未通过验真（${probe.reason ?? '未知原因'}）`);
+                        logger.warn(LOG_PREFIX, `音源 ${record.file} 返回的地址未通过验真：${probe.reason ?? ''}`, resolved);
+                        continue;
+                    }
+                    logger.log(
+                        LOG_PREFIX,
+                        `地址验真通过（${record.file}${probe.total != null ? `，${probe.total} 字节` : '，大小未知'}）`,
+                        resolved,
+                    );
+                }
                 onAudioSource(resolved);
                 return {
                     ok: true,

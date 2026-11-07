@@ -20,7 +20,7 @@ import type {
     CustomSourceListEnvelope,
     CustomSourceResolveAnswer,
 } from '../types';
-import { createNativeLxRequest } from './http';
+import { createNativeAudioProbe, createNativeLxRequest } from './http';
 import { createMobileScriptStore } from './store';
 
 /** A file name that cannot escape the sources directory or trip up Android's filesystem. */
@@ -209,7 +209,9 @@ export const installMobileCustomSourceBridge = async (): Promise<boolean> => {
     if (!Capacitor.isNativePlatform()) return false;
 
     const store = createMobileScriptStore();
-    const host = createLxHost({ store, request: createNativeLxRequest() });
+    // The native HEAD probe: an address that answers with a spoken notice instead of the song is
+    // rejected exactly as the desktop host rejects it, so the fallback chain still runs.
+    const host = createLxHost({ store, request: createNativeLxRequest(), probeAudioUrl: createNativeAudioProbe() });
     setCustomSourceBridge(createMobileBridge(host, store));
     console.log('[CustomSource] 已启用手机端音源宿主', store.dirLabel);
     return true;

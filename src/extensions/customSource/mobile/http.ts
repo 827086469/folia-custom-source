@@ -11,11 +11,19 @@
 // and scripts read `resp.body.code` rather than a string.
 
 import { CapacitorHttp } from '@capacitor/core';
-import type { LxRequest, LxRequestOptions, LxResponse } from '../lx/scriptHost';
+import type { LxAudioProbe, LxProbeResult, LxRequest, LxRequestOptions, LxResponse } from '../lx/scriptHost';
 
 const DEFAULT_TIMEOUT_MS = 20_000;
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 '
-    + '(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
+  + '(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
+
+/**
+ * A playable file below this size is not the song, but a spoken notice served as audio. Same value
+ * and same reasoning as the desktop probe (`custom-source/lxHost.cjs`): 30 seconds at 64 kbps is
+ * already ~240 KB, while the notices are tens of KB.
+ */
+const MIN_SONG_BYTES = 200 * 1024;
+const PROBE_TIMEOUT_MS = 8_000;
 
 const decodeBase64 = (value: string): Uint8Array => {
     const binary = atob(value);
@@ -132,6 +140,54 @@ export const createNativeLxRequest = (): LxRequest => (
     // CapacitorHttp has no abort: the request is a promise the native layer owns. Cancelling is
     // only ever used to drop an answer nobody wants any more, which `settled` already does.
     return () => { settled = true; };
+};
+
+/**
+ * The audio URL probe for the Android shell. A GET through CapacitorHttp would pull the whole
+ * response body into memory (the native layer has no "headers only" mode), so this asks with HEAD
+ * instead: no body is ever transferred, and `Content-Length` on a HEAD answer is the full entity
+ * size, which is exactly what the probe needs.
+ *
+ * Only what the probe can prove counts against the address: a spoken notice (HTTP 200, audio
+ * content-type, tens of KB), an HTML/JSON error page, or a 404/410. A HEAD answer the CDN refuses
+ * (403/405 - some signed URLs are method-bound) or a network failure says nothing about whether
+ * the song plays, so those pass and the player remains the judge.
+ */
+export const createNativeAudioProbe = (): LxAudioProbe => async (url: string): Promise<LxProbeResult> => {
+    try {
+        const answer = await CapacitorHttp.request({
+            url: String(url),
+            method: 'HEAD',
+            headers: { 'User-Agent': DEFAULT_USER_AGENT },
+            responseType: 'arraybuffer',
+            connectTimeout: PROBE_TIMEOUT_MS,
+            readTimeout: PROBE_TIMEOUT_MS,
+        });
+        const status = Number(answer.status) || 0;
+        const headers = normalizeHeaders(answer.headers);
+        if (status !== 200 && status !== 206) {
+            if (status === 404 || status === 410) return { ok: false, reason: `HTTP ${status}` };
+            // 403/405/5xx: the server refused the method, not necessarily the song.
+            return { ok: true, total: null, reason: `HEAD ${status}，未验真` };
+        }
+        const contentType = headers['content-type'] || '';
+        if (/\bjson\b|\bxml\b|\bhtml\b|text\//i.test(contentType)) {
+            return { ok: false, reason: `返回的是 ${contentType || '无类型'} 而不是音频` };
+        }
+        const length = Number(headers['content-length']);
+        const total = Number.isFinite(length) && length >= 0 ? length : null;
+        if (total != null && total < MIN_SONG_BYTES) {
+            return {
+                ok: false,
+                reason: `音频只有 ${total} 字节（不足 ${Math.floor(MIN_SONG_BYTES / 1024)} KB，疑似错误提示语音）`,
+                total,
+            };
+        }
+        return { ok: true, total };
+    } catch {
+        // A probe that cannot answer (timeout, network error) is not a reason to drop the address.
+        return { ok: true, total: null, reason: '未验真' };
+    }
 };
 
 const describe = (error: unknown): string => {
