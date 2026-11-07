@@ -16,6 +16,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const nodeHttp = require('node:http');
+const nodeHttps = require('node:https');
 const nodeCrypto = require('node:crypto');
 const nodeZlib = require('node:zlib');
 
@@ -58,6 +60,22 @@ const RESOLVE_TIMEOUT_MS = 12_000;
 const RESOLVE_BUDGET_MS = 25_000;
 /** How long a script may take to send `inited` - real ones ask a server for their source list first. */
 const INIT_TIMEOUT_MS = 8_000;
+/**
+ * How long the audio probe may wait for response headers. It asks for one ranged byte, so a server
+ * that has the file answers in a single round trip; one that takes this long cannot be judged and
+ * is given the benefit of the doubt rather than failing the address.
+ */
+const PROBE_TIMEOUT_MS = 8_000;
+/**
+ * A playable file below this size is not the song. A channel that cannot really serve a track has
+ * taken to answering with a valid http(s) audio URL whose content is a few seconds of spoken
+ * notice - "无法获取这首歌曲的播放链接" and the like - which the player then plays like a song,
+ * so no error ever surfaces anywhere. Real audio clears this bar easily: 30 seconds at 64 kbps is
+ * already ~240 KB.
+ */
+const MIN_SONG_BYTES = 200 * 1024;
+const PROBE_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+  + '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 const CONFIG_FILE = 'config.json';
 
 const LOG_PREFIX = '[CustomSource]';
@@ -114,6 +132,94 @@ const withTimeout = (promise, timeoutMs, message) => new Promise((resolve, rejec
     value => { clearTimeout(timer); resolve(value); },
     error => { clearTimeout(timer); reject(error); },
   );
+});
+
+/**
+ * The total size the probe can read off the headers: `Content-Range` carries it when the server
+ * honours the range request ("bytes 0-0/1234567"), `Content-Length` when it answers 200 instead.
+ * Chunked answers with neither say nothing about their size - that is `null`, "cannot judge".
+ */
+const readTotalBytes = headers => {
+  const contentRange = String(headers['content-range'] || '');
+  const match = /\/(\d+)\s*$/.exec(contentRange);
+  if (match) return Number(match[1]);
+  const length = Number(headers['content-length']);
+  if (Number.isFinite(length) && length >= 0) return length;
+  return null;
+};
+
+/**
+ * Asks a handed-out address for its headers - one ranged byte, the body is never read - to see
+ * whether it really is the song. Only what the probe can prove counts against the address: a wrong
+ * status, a text/json answer, or a file too small to be the song. A server too slow to answer, or
+ * one that says nothing about its size, is passed as-is: the player itself remains the judge there.
+ */
+const probeAudioUrl = (targetUrl, redirectsLeft = 4) => new Promise(resolve => {
+  let parsed;
+  try {
+    parsed = new URL(targetUrl);
+  } catch {
+    resolve({ ok: false, reason: '地址无法解析' });
+    return;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    resolve({ ok: false, reason: '不是 http(s) 地址' });
+    return;
+  }
+
+  let settled = false;
+  const settle = result => {
+    if (settled) return;
+    settled = true;
+    resolve(result);
+  };
+
+  const transport = parsed.protocol === 'https:' ? nodeHttps : nodeHttp;
+  const request = transport.request({
+    protocol: parsed.protocol,
+    hostname: parsed.hostname,
+    port: parsed.port || undefined,
+    path: `${parsed.pathname}${parsed.search}`,
+    method: 'GET',
+    headers: { 'User-Agent': PROBE_USER_AGENT, Range: 'bytes=0-0' },
+  }, response => {
+    const statusCode = response.statusCode || 0;
+    const location = response.headers.location;
+    if (location && statusCode >= 300 && statusCode < 400 && redirectsLeft > 0) {
+      response.resume();
+      probeAudioUrl(new URL(location, targetUrl).href, redirectsLeft - 1).then(settle);
+      return;
+    }
+    // Headers are all this probe wants; the body (and with it the socket) is dropped right away.
+    response.destroy();
+    const contentType = String(response.headers['content-type'] || '');
+    if (statusCode !== 200 && statusCode !== 206) {
+      settle({ ok: false, reason: `HTTP ${statusCode}` });
+      return;
+    }
+    if (/\bjson\b|\bxml\b|\bhtml\b|text\//i.test(contentType)) {
+      settle({ ok: false, reason: `返回的是 ${contentType || '无类型'} 而不是音频` });
+      return;
+    }
+    const total = readTotalBytes(response.headers);
+    if (total != null && total < MIN_SONG_BYTES) {
+      settle({ ok: false, reason: `音频只有 ${total} 字节（不足 ${Math.floor(MIN_SONG_BYTES / 1024)} KB，疑似错误提示语音）`, total });
+      return;
+    }
+    settle({ ok: true, total });
+  });
+
+  request.setTimeout(PROBE_TIMEOUT_MS, () => {
+    // Destroying after the headers have been read fires this late; a probe already answered.
+    if (settled) return;
+    request.destroy();
+    settle({ ok: true, reason: '响应太慢，未验真' });
+  });
+  request.on('error', error => {
+    if (settled) return;
+    settle({ ok: false, reason: describeError(error) });
+  });
+  request.end();
 });
 
 const describeError = error => {
@@ -473,6 +579,19 @@ const createCustomSourceHost = ({ dir, onAudioSource = () => {}, logger = consol
           continue;
         }
         const resolved = url.trim();
+        // An address that answers with a spoken notice instead of the song is not an address: the
+        // probe checks the headers (status, type, size) and lets the next script try when it fails.
+        const probe = await probeAudioUrl(resolved);
+        if (!probe.ok) {
+          failures.push(`${record.file}：地址未通过验真（${probe.reason}）`);
+          logger.warn(LOG_PREFIX, `音源 ${record.file} 返回的地址未通过验真：${probe.reason}`, resolved);
+          continue;
+        }
+        logger.log(
+          LOG_PREFIX,
+          `地址验真通过（${record.file}${probe.total != null ? `，${probe.total} 字节` : '，大小未知'}）`,
+          resolved,
+        );
         // The visualizer reads the audio through Web Audio, so the host this URL lives on needs CORS.
         onAudioSource(resolved);
         return { ok: true, url: resolved, quality: LX_TO_FOLIA_QUALITY[lxQuality] || quality, script: record.file };
