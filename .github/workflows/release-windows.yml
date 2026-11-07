@@ -1,0 +1,85 @@
+name: Release Windows Installer
+
+# Tag push only: `git push origin v0.7.24` builds the installer and attaches it to that
+# version's release. Building and uploading on the runner avoids pushing a 240 MB artifact
+# through the maintainer's uplink - the runner reaches GitHub's storage directly.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Build and publish NSIS installer (x64)
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Node.js 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache wallpaper-helper Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packaging/windows/wallpaper-helper
+
+      # WorkerW attach + raw-input mouse forwarding, shipped as build/folia-wallpaper-helper.exe
+      - name: Build wallpaper helper
+        run: node packaging/windows/build-wallpaper-helper.mjs
+
+      # MNN (analysis models runtime) is compiled from the pinned source by build/beforePack.cjs
+      - name: Cache MNN runtime build
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/.mnn-src
+            build/mnn
+          key: mnn-${{ runner.os }}-${{ hashFiles('build/buildMnnRuntime.mjs', 'native/folia-mnn/**') }}
+
+      - name: Build web app
+        env:
+          ELECTRON: 'true'
+        run: npm run build
+
+      - name: Package installer
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: npx electron-builder --win nsis --x64 --publish never
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v6
+        with:
+          name: folia-windows
+          path: |
+            release/*.exe
+            release/*.blockmap
+            !release/builder-debug.yml
+          if-no-files-found: error
+          retention-days: 14
+
+      # An existing draft for this tag is reused: its hand-written notes are kept (no `body`
+      # here, which would overwrite them) and it is published once the assets are up.
+      - name: Attach installer to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          fail_on_unmatched_files: true
+          files: |
+            release/*.exe
+            release/*.blockmap
