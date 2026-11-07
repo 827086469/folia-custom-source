@@ -139,8 +139,11 @@ const Visualizer: React.FC<VisualizerProps> = (props) => {
         return buildDisplayWordsFromLayoutUnits(layoutUnits);
     }, [activeLine, resolvedClassicTuning.useLegacyLayout]);
 
-    const mainFontSize = `clamp(${(2.25 * lyricsFontScale).toFixed(3)}rem, ${(6 * lyricsFontScale).toFixed(3)}vw, ${(4.5 * lyricsFontScale).toFixed(3)}rem)`;
-    const emptyFontSize = `clamp(${(1.5 * lyricsFontScale).toFixed(3)}rem, ${(3.5 * lyricsFontScale).toFixed(3)}vw, ${(2.25 * lyricsFontScale).toFixed(3)}rem)`;
+    // `min(…vw, …vh)`: the size follows the width, but a viewport whose height is the smaller
+    // side (a phone in landscape, a short window) shrinks the line with the height instead of
+    // overflowing the screen with it. Desktop heights leave the value untouched.
+    const mainFontSize = `clamp(${(2.25 * lyricsFontScale).toFixed(3)}rem, min(${(6 * lyricsFontScale).toFixed(3)}vw, ${(9 * lyricsFontScale).toFixed(3)}vh), ${(4.5 * lyricsFontScale).toFixed(3)}rem)`;
+    const emptyFontSize = `clamp(${(1.5 * lyricsFontScale).toFixed(3)}rem, min(${(3.5 * lyricsFontScale).toFixed(3)}vw, ${(5 * lyricsFontScale).toFixed(3)}vh), ${(2.25 * lyricsFontScale).toFixed(3)}rem)`;
     const { translationFontSize, upcomingFontSize } = resolveSubtitleFontSizes(lyricsFontScale);
 
     // Generate a stable random layout configuration for the current line.
@@ -185,7 +188,10 @@ const Visualizer: React.FC<VisualizerProps> = (props) => {
         const pxFontSize = getPixelFontSize(lyricsFontScale, viewportWidth);
         const wordWidths = displayWords.map(w => measureWordWidth(w.text, pxFontSize, fontStack, fontWeight));
 
-        const baseSpread = isChaotic ? 60 : isCalm ? 0 : 20;
+        // Scaled down on a narrow viewport: these offsets are absolute pixels tuned on desktop,
+        // and ±60px on a 360px-wide phone walks words straight off the screen edge.
+        const spreadScale = Math.min(1, viewportWidth / 800);
+        const baseSpread = (isChaotic ? 60 : isCalm ? 0 : 20) * spreadScale;
         const baseRotate = isChaotic ? 30 : isCalm ? 0 : 5;
 
         const wordConfigs: WordLayoutConfig[] = displayWords.map((w, i) => {
@@ -324,7 +330,7 @@ const Visualizer: React.FC<VisualizerProps> = (props) => {
                             variants={{ leave: (hidden: boolean) => (hidden ? TEXT_HIDDEN_EXIT : activeLineContainerMotion.exit) }}
                             exit="leave"
                             className={`flex flex-wrap w-full max-w-6xl content-center ${lineConfig.justifyContent} ${lineConfig.alignItems}`}
-                            style={{ perspective: `${lineConfig.perspective}px`, minHeight: '300px' }}
+                            style={{ perspective: `${lineConfig.perspective}px`, minHeight: 'min(300px, 70vh)' }}
                         >
                             {displayWords.map((word, idx) => {
                                 const config = wordConfigs[idx] || { id: `fallback-${idx}`, x: 0, y: 0, rotate: 0, scale: 1, marginRight: '0.5rem', alignSelf: 'auto', passedRotate: 0 };

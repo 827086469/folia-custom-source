@@ -70,6 +70,37 @@ const PagePonderTouchButton: React.FC<PagePonderTouchButtonProps> = ({ theme, is
         }, REVEAL_MS);
     }, []);
 
+    /** 收起不再等计时器：露着的四秒里它可能正压着右上角的别的按钮（搜索框的关闭、页签……）。 */
+    const hide = useCallback(() => {
+        if (hideTimerRef.current !== null) {
+            window.clearTimeout(hideTimerRef.current);
+            hideTimerRef.current = null;
+        }
+        setIsRevealed(false);
+    }, []);
+
+    // 用户在打字（搜索框、过滤框……）时它没有用处，而那些界面的关闭按钮常在右上角——
+    // 恰好是它站的地方。聚焦期间整体不渲染；失焦不自动弹回，等下一次换页或点热区。
+    const [isTextInputFocused, setIsTextInputFocused] = useState(false);
+    useEffect(() => {
+        if (!isCoarsePointer || !showTouchButton || typeof window === 'undefined') {
+            return undefined;
+        }
+        const isEditable = (element: EventTarget | null): boolean => (
+            element instanceof HTMLElement
+            && (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA' || element.isContentEditable)
+        );
+        const onFocusIn = (event: FocusEvent) => setIsTextInputFocused(isEditable(event.target));
+        // focusout 之后 activeElement 才落定，下一个 tick 读。
+        const onFocusOut = () => window.setTimeout(() => setIsTextInputFocused(isEditable(document.activeElement)), 0);
+        window.addEventListener('focusin', onFocusIn);
+        window.addEventListener('focusout', onFocusOut);
+        return () => {
+            window.removeEventListener('focusin', onFocusIn);
+            window.removeEventListener('focusout', onFocusOut);
+        };
+    }, [isCoarsePointer, showTouchButton]);
+
     // 换页时重新露一次：这颗按钮讲的是「思索当前页面」，页面换了就值得再说一遍自己在。
     useEffect(() => {
         if (!isCoarsePointer || !showTouchButton) {
@@ -99,8 +130,10 @@ const PagePonderTouchButton: React.FC<PagePonderTouchButtonProps> = ({ theme, is
             const inHotspot = event.clientY <= HOTSPOT_SIZE_PX
                 && event.clientX >= window.innerWidth - HOTSPOT_SIZE_PX;
             if (!inHotspot) {
-                // 手指落在别处，上一面没用掉的旗就作废 —— 免得它留到下一次真正的点击上。
+                // 手指落在别处：上一面没用掉的旗就作废，并且立刻把这颗按钮收起——
+                // 它正压着的那个角落，可能就是用户这一下要去按的地方。
                 suppressNextClickRef.current = false;
+                if (isRevealedRef.current) hide();
                 return;
             }
 
@@ -111,9 +144,9 @@ const PagePonderTouchButton: React.FC<PagePonderTouchButtonProps> = ({ theme, is
 
         window.addEventListener('pointerdown', handlePointerDown, { passive: true, capture: true });
         return () => window.removeEventListener('pointerdown', handlePointerDown, { capture: true });
-    }, [isCoarsePointer, reveal, showTouchButton]);
+    }, [hide, isCoarsePointer, reveal, showTouchButton]);
 
-    if (!isCoarsePointer || !showTouchButton || hasSession || isOnboardingOpen) {
+    if (!isCoarsePointer || !showTouchButton || hasSession || isOnboardingOpen || isTextInputFocused) {
         return null;
     }
 

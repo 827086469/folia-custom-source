@@ -38,14 +38,18 @@ export const useWallCameraPan = ({
 
     // `instant` skips the flight: entering the wall centres on the playing song before the first
     // paint, where a 0.4s pan from the default camera would only look like a stray drift.
-    const panTo = useCallback((rect: WallRect, instant = false) => {
+    // `scale` is the scale the flight ends at (defaults to the current one): the expanded card on
+    // a phone does not fit the viewport at the breakpoint scale, so its pan zooms out just enough
+    // to fit and the pan back restores.
+    const panTo = useCallback((rect: WallRect, instant = false, scale?: number) => {
         animationRef.current?.stop();
         const from = cameraRef.current;
         const viewport = viewportRef.current;
+        const toScale = scale !== undefined && scale > 0 ? scale : from.scale;
         const target = {
-            x: viewport.width / 2 - (rect.x + rect.width / 2) * from.scale,
-            y: viewport.height / 2 - (rect.y + rect.height / 2) * from.scale,
-            scale: from.scale,
+            x: viewport.width / 2 - (rect.x + rect.width / 2) * toScale,
+            y: viewport.height / 2 - (rect.y + rect.height / 2) * toScale,
+            scale: toScale,
         };
         reserveBounds(target);
         if (reducedMotion || instant) {
@@ -59,7 +63,7 @@ export const useWallCameraPan = ({
             onUpdate: progress => applyCamera({
                 x: from.x + (target.x - from.x) * progress,
                 y: from.y + (target.y - from.y) * progress,
-                scale: from.scale,
+                scale: from.scale + (toScale - from.scale) * progress,
             }),
             onComplete: () => {
                 animationRef.current = null;

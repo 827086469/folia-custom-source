@@ -76,6 +76,9 @@ const CAMERA_HOME = { x: 34, y: 80 };
 
 const getScale = (width: number) => width < 640 ? 0.52 : width < 1100 ? 0.64 : 0.76;
 
+/** How much of the viewport a grown card may claim when the camera zooms out to fit it. */
+const FIT_FRACTION = 0.92;
+
 const getWorldBounds = (camera: LatticeCamera, viewport: { width: number; height: number }): Bounds => ({
     left: -camera.x / camera.scale,
     top: -camera.y / camera.scale,
@@ -352,6 +355,18 @@ export default function PosterWall({
     // 50+ poster bodies back on the critical path of every unrelated App re-render.
     const latestWall = useRef({ wallLayout, instances, tiles });
     latestWall.current = { wallLayout, instances, tiles };
+    // The camera zooms out to fit a card the viewport cannot hold at the breakpoint scale (a
+    // 6×6 gear on a phone, portrait or landscape) and back in once none is grown. Only out: on a
+    // screen the card already fits, this returns the breakpoint scale and nothing moves.
+    const getFitScale = useCallback((rect: { width: number; height: number }) => {
+        const viewport = viewportRef.current;
+        const base = getScale(viewport.width);
+        return Math.min(
+            base,
+            (viewport.width * FIT_FRACTION) / Math.max(rect.width, 1),
+            (viewport.height * FIT_FRACTION) / Math.max(rect.height, 1),
+        );
+    }, []);
     const expandPoster = useCallback((instanceId: string) => {
         const { wallLayout: currentLayout, instances: currentInstances, tiles: currentTiles } = latestWall.current;
         const instance = currentInstances.find(item => item.instanceId === instanceId);
@@ -361,9 +376,26 @@ export default function PosterWall({
         setActivePoster({ instance, tile });
         // Expansion reflows both the position and size of the selected slot.
         const expandedRect = currentLayout.grown(instance).get(instanceId);
-        if (expandedRect) panTo(expandedRect);
-    }, [panTo, setActivePoster, setFocused]);
+        if (expandedRect) panTo(expandedRect, false, getFitScale(expandedRect));
+    }, [getFitScale, panTo, setActivePoster, setFocused]);
     const collapsePoster = useCallback(() => setActivePoster(null), [setActivePoster]);
+    // The playback focus pans to grown cards (song change, the locate button), so it gets the same
+    // fit: for a plain poster rect this is the breakpoint scale and nothing zooms.
+    const panToGrown = useCallback((rect: { x: number; y: number; width: number; height: number }, instant?: boolean) => {
+        panTo(rect, instant, getFitScale(rect));
+    }, [getFitScale, panTo]);
+    // A zoom that was only for the grown card ends with it: back to the breakpoint scale, around
+    // the point the viewport is centred on, so the wall does not stay small after a collapse.
+    useEffect(() => {
+        if (activePoster) return;
+        const camera = cameraRef.current;
+        const base = getScale(viewportRef.current.width);
+        if (Math.abs(camera.scale - base) < 0.001) return;
+        const viewport = viewportRef.current;
+        const centerX = (viewport.width / 2 - camera.x) / camera.scale;
+        const centerY = (viewport.height / 2 - camera.y) / camera.scale;
+        panTo({ x: centerX, y: centerY, width: 0, height: 0 }, false, base);
+    }, [activePoster, panTo]);
 
     useLatticePlaybackFocus({
         currentSong,
@@ -374,7 +406,7 @@ export default function PosterWall({
         getViewportCenter,
         setActivePoster,
         setFocused,
-        panTo,
+        panTo: panToGrown,
     });
     const currentSongKey = currentSong ? getPlaybackSongKey(currentSong) : null;
     const handoff = useLatticeWallHandoff({
