@@ -97,13 +97,36 @@ const FALLBACK_TTL_MS = 10 * 60 * 1000;
 const fallbackCache = new Map<string, { source: ProviderAudioSource; at: number }>();
 
 /**
+ * 兜底搜索结果里挑出「就是这一首」的那条。搜索的第一名不总是目标——搜「可爱女人 周杰伦」时
+ * 酷狗把《很爱很爱你》排在第一，盲取第一条会放错歌；名字对不上就宁可不兜底，让原本的失败冒出来。
+ */
+const normalizeForMatch = (value: string): string => value.replace(/\s+/g, '').toLowerCase();
+
+const pickSearchMatch = (songs: SongResult[], song: SongResult, providerId: string): SongResult | null => {
+    const keyed = songs.filter(s => (providerId === 'kugou' ? s.kgHash : s.qqMid));
+    const targetName = normalizeForMatch(song.name || '');
+    if (!targetName) return null;
+    const byName = keyed.filter(s => normalizeForMatch(s.name || '') === targetName);
+    if (byName.length === 0) return null;
+    const targetArtists = (song.artists || []).map(a => normalizeForMatch(a.name || '')).filter(Boolean);
+    return (
+        byName.find(s => {
+            const names = (s.artists || []).map(a => normalizeForMatch(a.name || '')).filter(Boolean);
+            return targetArtists.some(target => names.some(name => name.includes(target) || target.includes(name)));
+        })
+        ?? byName[0]
+        ?? null
+    );
+};
+
+/**
  * 跨平台兜底取址：本平台的脚本与内置音源都拿不到地址时，用「歌名 歌手」到酷狗 / QQ 回查，
  * 拿到那边的 id 再让脚本取址。网易云的歌单（wy 的脚本取址基本不通）靠这条救回来；
  * 不依赖登录，也不改队列里那首歌本身——只有声音换了来源。
  *
  * 平台先后与搜索聚合一致：先酷狗（公共接口、脚本成功率高），再 QQ。
  */
-const crossPlatformSource = async (
+export const crossPlatformSource = async (
     song: SongResult,
     quality: AudioQualityPreference,
 ): Promise<ProviderAudioSource | null> => {
@@ -124,7 +147,7 @@ const crossPlatformSource = async (
         try {
             const songs = await run();
             const providerId = LX_PROVIDER_BY_SOURCE[lxSource];
-            match = songs.find(s => (providerId === 'kugou' ? s.kgHash : s.qqMid)) ?? null;
+            match = pickSearchMatch(songs, song, providerId);
         } catch (error) {
             console.warn(`[CustomSource] 兜底搜索（${lxSource}）失败:`, error);
         }

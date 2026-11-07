@@ -23,6 +23,7 @@ import type {
     ProviderSongAvailability,
 } from '../../types/onlineMusic';
 import { OnlineProviderError } from '../../types/onlineMusic';
+import { crossPlatformSource } from '../customSource';
 import { getCustomSourceBridge } from '../customSource/bridge';
 import { getBuiltinLyrics } from './lyrics';
 import {
@@ -129,6 +130,9 @@ export const builtinProvider: OnlineMusicProvider = {
 
             const musicInfo = toLxMusicInfo(song);
             if (!musicInfo) {
+                // 取址字段缺失（酷狗歌没 hash 之类）时，与下面一样可以靠别的平台救回。
+                const fallback = await crossPlatformSource(song, quality);
+                if (fallback) return fallback;
                 throw new OnlineProviderError(
                     'invalid-response',
                     `缺少 ${PLATFORM_LABEL[parts.platform]} 的取址字段（可能是酷狗歌曲还没拿到 hash）`,
@@ -142,6 +146,10 @@ export const builtinProvider: OnlineMusicProvider = {
                 quality,
             });
             if (!answer.ok || !answer.url) {
+                // 歌曲自己的平台拿不到地址（网易无版权的歌最常见）时，跨平台兜底是最后一招：
+                // 用「歌名 歌手」搜酷狗/QQ，让脚本在那边取址。导入歌单里的 wy 歌靠这条救回。
+                const fallback = await crossPlatformSource(song, quality);
+                if (fallback) return fallback;
                 throw new OnlineProviderError(
                     answer.error?.code === 'no-source' ? 'unavailable' : 'network',
                     answer.error?.message || `${PLATFORM_LABEL[parts.platform]} 取址失败`,
