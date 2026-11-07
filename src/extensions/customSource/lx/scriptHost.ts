@@ -119,11 +119,27 @@ interface LxScriptMeta {
     homepage: string;
 }
 
+/**
+ * The object an `lx.on(lx.EVENT_NAMES.request)` handler is called with.
+ *
+ * LX 2.x hands scripts `{ source, action, info }` and the handler branches on `action`; a script
+ * that reads `action` and gets `undefined` answers "action not support" for every song. `type` and
+ * `musicInfo` are repeated at the top level because several community scripts read them there.
+ * This is the same shape the desktop host builds (`custom-source/lxHost.cjs`).
+ */
+export interface LxRequestEventPayload {
+    source: string;
+    action: 'musicUrl';
+    info: { type: string; musicInfo: Record<string, string | number> };
+    type: string;
+    musicInfo: Record<string, string | number>;
+}
+
 export interface LxScriptRecord {
     file: string;
     meta: LxScriptMeta;
     sources: Record<string, LxSourceDescriptor>;
-    handler: ((info: { type: string; musicInfo: Record<string, string | number> }) => unknown) | null;
+    handler: ((payload: LxRequestEventPayload) => unknown) | null;
     error: string | null;
     inited: boolean;
     settled: boolean;
@@ -576,9 +592,18 @@ export const createLxHost = ({ store, request, onAudioSource = () => undefined, 
             }
             const descriptor = record.sources[source] || { qualitys: [] as string[] };
             const lxQuality = pickQuality(descriptor.qualitys || [], quality);
+            // The handler must see the LX event shape, not our own: `action` is what a script
+            // branches on, and `info` is where it expects the quality and the song.
+            const payload: LxRequestEventPayload = {
+                source,
+                action: 'musicUrl',
+                info: { type: lxQuality, musicInfo },
+                type: lxQuality,
+                musicInfo,
+            };
             try {
                 const url = await withTimeout(
-                    Promise.resolve().then(() => record.handler?.({ type: lxQuality, musicInfo })),
+                    Promise.resolve().then(() => record.handler?.(payload)),
                     Math.min(RESOLVE_TIMEOUT_MS, remaining),
                     `音源 ${record.file} 超时未返回地址`,
                 );
